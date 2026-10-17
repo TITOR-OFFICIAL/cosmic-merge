@@ -294,10 +294,28 @@
         }
     </style>
 
+    <!-- Скрипт SDK Пикабу Игр -->
+    <script async src="https://games.pikabu.ru/sdk/sdk.js" onload="initPikabuSDK()"></script>
+    
     <!-- Интеграция GamePush SDK (Проект 31562) -->
     <script>
-        // Вызывается SDK после инициализации. Игра может быть ещё не создана
-        // (скрипт SDK асинхронный), поэтому ставим флаг, а игра сама проверит его при старте.
+        // Инициализация Пикабу SDK
+        window.isPikabuEnv = false;
+        async function initPikabuSDK() {
+            try {
+                // Если мы загрузились не в iframe Пикабу, init() может выкинуть ошибку, ловим её
+                window.pikabuSdk = await PkbSDK.init();
+                window.isPikabuEnv = true;
+                console.log("Pikabu SDK Inited");
+                if (window.GameApp && window.__gameReadyCalled) {
+                     window.pikabuSdk.gameStarted();
+                }
+            } catch (e) {
+                console.warn("Pikabu SDK failed or not in Pikabu env", e);
+            }
+        }
+
+        // Вызывается GamePush SDK после инициализации. 
         window.onGPInit = async (gp) => {
             window.gp = gp;
             try {
@@ -309,7 +327,7 @@
             if (window.GameApp) window.GameApp.onSDKReady(gp);
         };
 
-        // Загрузка SDK с запасными адресами (как в официальном загрузчике GamePush)
+        // Загрузка GamePush SDK с запасными адресами (будет работать, если мы не на Пикабу)
         (function () {
             var qs = '?projectId=31562&publicToken=FDPK3xsqEIKjF5xjbaEeGmiCB3WShHnc&callback=onGPInit';
             var urls = [
@@ -1011,44 +1029,81 @@
         });
     }
 
-    // ===== GamePush helpers =====
+    // ===== GamePush и Пикабу helpers =====
     function gpPlayerReady() {
+        if (window.isPikabuEnv && window.pikabuSdk) return true;
         return !!(window.gp && window.gp.player && window.__gpReady);
     }
+    
     function gpCall(name) {
         try {
-            if (window.gp && typeof window.gp[name] === 'function') window.gp[name]();
+            if (window.isPikabuEnv && window.pikabuSdk && typeof window.pikabuSdk[name] === 'function') {
+                window.pikabuSdk[name]();
+            } else if (window.gp && typeof window.gp[name] === 'function') {
+                window.gp[name]();
+            }
         } catch (e) {
-            console.warn('GP ' + name + ' error:', e);
+            console.warn('SDK ' + name + ' error:', e);
         }
     }
+    
     let gameplayActive = false;
     function setGameplay(active) {
         if (gameplayActive === active) return;
         gameplayActive = active;
-        gpCall(active ? 'gameplayStart' : 'gameplayStop');
+        // В Пикабу SDK нет отдельного геймплей старта, только gameStarted(), который вызываем один раз
+        if (!window.isPikabuEnv) {
+             gpCall(active ? 'gameplayStart' : 'gameplayStop');
+        }
     }
 
     // Облако: значение ставим сразу, а sync() вызываем не чаще раза в 15 сек
     // (раньше sync() дёргался на КАЖДОМ слиянии при новом рекорде)
     let cloudDirty = false;
     let lastCloudSync = 0;
-    function pushCloud(force) {
+    
+    async function getCloudScore() {
+        if (!gpPlayerReady()) return 0;
+        if (window.isPikabuEnv && window.pikabuSdk) {
+            try {
+                const data = await window.pikabuSdk.storage.get(['score']);
+                return Number(data.score) || 0;
+            } catch (e) {
+                 return 0;
+            }
+        } else {
+             return Number(window.gp.player.get('score')) || 0;
+        }
+    }
+
+    async function pushCloud(force) {
         if (!gpPlayerReady()) return;
         try {
-            const player = window.gp.player;
-            const cloudBest = Number(player.get('score')) || 0;
+            const cloudBest = await getCloudScore();
             if (bestScore > cloudBest) {
-                player.set('score', bestScore);
-                cloudDirty = true;
+                if (window.isPikabuEnv && window.pikabuSdk) {
+                    cloudDirty = true;
+                } else {
+                    window.gp.player.set('score', bestScore);
+                    cloudDirty = true;
+                }
             }
             if (cloudDirty && (force || Date.now() - lastCloudSync >= 15000)) {
                 cloudDirty = false;
                 lastCloudSync = Date.now();
-                Promise.resolve(player.sync()).catch(err => {
-                    cloudDirty = true;
-                    console.warn("Cloud sync warning:", err);
-                });
+                
+                if (window.isPikabuEnv && window.pikabuSdk) {
+                    try {
+                        await window.pikabuSdk.storage.set({ score: bestScore });
+                    } catch (e) {
+                         cloudDirty = true;
+                    }
+                } else {
+                     Promise.resolve(window.gp.player.sync()).catch(err => {
+                        cloudDirty = true;
+                        console.warn("Cloud sync warning:", err);
+                    });
+                }
             }
         } catch (err) {
             console.warn("Cloud sync warning:", err);
@@ -1056,7 +1111,7 @@
     }
     setInterval(() => { if (cloudDirty) pushCloud(false); }, 5000);
 
-    // Загрузка сохранений из localStorage + синхронизация с облаком GamePush
+    // Загрузка сохранений из localStorage + синхронизация с облаком
     function loadProgress() {
         try {
             const savedBest = localStorage.getItem('cosmic_merge_best');
@@ -1547,9 +1602,7 @@
         if (e.pointerId === pressId) pressId = null;
     });
 
-    // 5. Реклама GamePush. По документации showRewardedVideo()/showFullscreen() возвращают Promise
-    // (true — реклама досмотрена). Callback-объекты SDK не принимает — в старом коде они
-    // никогда не вызывались: награда не выдавалась, а «Играть заново» после рекламы не срабатывало.
+    // 5. Реклама GamePush и Пикабу.
     let adBusy = false;
     function withTimeout(promise, ms) {
         return Promise.race([
@@ -1557,7 +1610,9 @@
             new Promise(resolve => setTimeout(() => resolve(false), ms))
         ]);
     }
+    
     function hasAds(method) {
+        if (window.isPikabuEnv && window.pikabuSdk) return true; // SDK пикабу сам обрабатывает это
         return !!(window.gp && window.gp.ads && typeof window.gp.ads[method] === 'function');
     }
 
@@ -1573,7 +1628,11 @@
         setPause('ad', true);
         let success = false;
         try {
-            success = await withTimeout(window.gp.ads.showRewardedVideo(), 120000);
+            if (window.isPikabuEnv && window.pikabuSdk) {
+                 success = await withTimeout(window.pikabuSdk.showRewardedAd(), 120000);
+            } else {
+                 success = await withTimeout(window.gp.ads.showRewardedVideo(), 120000);
+            }
         } catch (err) {
             console.warn('Rewarded ad error:', err);
             success = false;
@@ -1597,7 +1656,11 @@
         pressId = null;
         setPause('ad', true);
         try {
-            await withTimeout(window.gp.ads.showFullscreen(), 60000);
+            if (window.isPikabuEnv && window.pikabuSdk) {
+                 await withTimeout(window.pikabuSdk.showFullscreenAd(), 60000);
+            } else {
+                 await withTimeout(window.gp.ads.showFullscreen(), 60000);
+            }
         } catch (err) {
             console.warn('Fullscreen ad error:', err);
         } finally {
@@ -1751,15 +1814,15 @@
         updateAudioPause();
     });
 
-    // 8. Связь с GamePush при инициализации
+    // 8. Связь с SDK при инициализации
     let sdkInited = false;
     window.GameApp = {
-        onSDKReady: (gp) => {
+        onSDKReady: async (gp) => {
             if (sdkInited) return;
             sdkInited = true;
             try {
                 // Подтягиваем облачный рекорд
-                const cloudBest = Number(gp.player.get('score')) || 0;
+                const cloudBest = await getCloudScore();
                 if (cloudBest > bestScore) {
                     bestScore = cloudBest;
                     updateScoreUI();
@@ -1772,18 +1835,30 @@
             }
             try {
                 // Глобальные паузы SDK (реклама, окна авторизации/оплаты)
-                if (typeof gp.on === 'function') {
+                if (window.isPikabuEnv && window.pikabuSdk && typeof window.pikabuSdk.on === 'function') {
+                    window.pikabuSdk.on('pause', () => setPause('sdk', true));
+                    window.pikabuSdk.on('resume', () => setPause('sdk', false));
+                } else if (gp && typeof gp.on === 'function') {
                     gp.on('pause', () => setPause('sdk', true));
                     gp.on('resume', () => setPause('sdk', false));
                 }
             } catch (e) {
                 console.warn("SDK events error:", e);
             }
-            // Сообщаем платформе, что игра загружена, и размечаем геймплей
-            gpCall('gameStart');
-            if (!isGameOver) {
-                gameplayActive = false;
-                setGameplay(true);
+            
+            // Сообщаем платформе Пикабу Игры, что игра загружена
+            window.__gameReadyCalled = true;
+            if (window.isPikabuEnv && window.pikabuSdk && typeof window.pikabuSdk.gameStarted === 'function') {
+                window.pikabuSdk.gameStarted();
+            }
+            
+            // Размечаем геймплей для GamePush
+            if (!window.isPikabuEnv) {
+                gpCall('gameStart');
+                if (!isGameOver) {
+                    gameplayActive = false;
+                    setGameplay(true);
+                }
             }
         }
     };
@@ -1798,7 +1873,11 @@
     requestAnimationFrame((t) => { lastTime = t; requestAnimationFrame(gameLoop); });
 
     // SDK мог инициализироваться раньше, чем загрузился этот скрипт
-    if (window.__gpReady && window.gp) window.GameApp.onSDKReady(window.gp);
+    if (window.isPikabuEnv && window.pikabuSdk) {
+        window.GameApp.onSDKReady();
+    } else if (window.__gpReady && window.gp) {
+        window.GameApp.onSDKReady(window.gp);
+    }
 })();
 </script>
 </body>
