@@ -994,7 +994,7 @@
         onSDKReady() {
             // Рекорд из стандартного поля score (первая версия игры сохраняла туда)
             try {
-                const cloudBest = Number(Core.gp.player.get('score')) || 0;
+                const cloudBest = Core.gp ? (Number(Core.gp.player.get('score')) || 0) : 0;
                 if (cloudBest > Core.data.best) Core.data.best = cloudBest;
             } catch (e) {}
             if (Core.currentScreen === 'scrMenu') openMenu();

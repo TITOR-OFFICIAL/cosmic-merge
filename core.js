@@ -192,6 +192,46 @@
     };
 
     // ======================================================================
+    // Пикабу Игры: собственный SDK (PkbSDK). Включается флагом window.PIKABU_BUILD
+    // в index.html пикабовской сборки. Реклама GamePush на Пикабу не работает —
+    // площадка отдаёт рекламу только через свой SDK.
+    // ======================================================================
+    Core.pkb = null;
+    let lastPkbFlush = 0;
+    function loadPikabuSDK() {
+        if (!global.PIKABU_BUILD) return;
+        const s = document.createElement('script');
+        s.async = true;
+        s.src = 'https://games.pikabu.ru/sdk/sdk.js';
+        s.onload = function () {
+            try {
+                Promise.resolve(global.PkbSDK.init()).then(onPkbReady).catch(e => console.warn('PkbSDK init:', e));
+            } catch (e) { console.warn('PkbSDK:', e); }
+        };
+        s.onerror = function () { console.warn('PkbSDK: script not loaded'); };
+        document.head.appendChild(s);
+    }
+    function savePkb(force) {
+        if (!cfg.cloudField) return;
+        try {
+            Core.pkb.storage.set(cfg.cloudField, Core.data);
+            // Лимит платформы: 100 явных flush за 5 минут — держим не чаще раза в 15 с
+            if (force && Date.now() - lastPkbFlush >= 15000) {
+                lastPkbFlush = Date.now();
+                Promise.resolve(Core.pkb.storage.flush()).catch(e => console.warn('Pkb flush:', e));
+            }
+        } catch (e) { console.warn('Pkb save:', e); }
+    }
+    function onPkbReady(sdk) {
+        if (Core.pkb || !sdk) return;
+        Core.pkb = sdk;
+        Core.setLang('ru'); // требование Пикабу: по умолчанию русский интерфейс
+        mergeCloud();
+        try { sdk.gameStarted(); } catch (e) { console.warn('PkbSDK gameStarted:', e); }
+        if (cfg.onSDKReady) cfg.onSDKReady();
+    }
+
+    // ======================================================================
     // Сохранения
     // ======================================================================
     Core.data = {};
@@ -206,7 +246,16 @@
         } catch (e) { return null; }
     }
     function readCloud() {
-        if (!Core.sdkReady || !cfg.cloudField) return null;
+        if (!cfg.cloudField) return null;
+        // Пикабу: собственное облачное хранилище PkbSDK
+        if (Core.pkb) {
+            try {
+                const raw = Core.pkb.storage.get(cfg.cloudField);
+                if (!raw) return null;
+                return typeof raw === 'string' ? JSON.parse(raw) : raw;
+            } catch (e) { return null; }
+        }
+        if (!Core.sdkReady) return null;
         try {
             const raw = Core.gp.player.get(cfg.cloudField);
             if (!raw) return null;
@@ -224,6 +273,7 @@
     Core.save = function (forceCloud) {
         Core.data._t = Date.now();
         try { localStorage.setItem(localKey(), JSON.stringify(Core.data)); } catch (e) {}
+        if (Core.pkb) savePkb(forceCloud);
         if (!Core.sdkReady) return;
         try {
             const player = Core.gp.player;
@@ -267,15 +317,25 @@
     // Награда выдаётся только если видео досмотрено. Без SDK (локальный тест) — сразу.
     Core.ads.rewarded = async function (onReward) {
         if (Core.ads.busy) return false;
-        if (!hasAds('showRewardedVideo')) {
-            onReward();
-            return true;
+        if (!Core.pkb) {
+            // Пикабу-сборка: SDK ещё не готов или недоступен — награду бесплатно не даём
+            if (global.PIKABU_BUILD) { Core.toast(Core.t('ad_unavailable')); return false; }
+            if (!hasAds('showRewardedVideo')) { onReward(); return true; }
         }
         Core.ads.busy = true;
         Core.setPause('ad', true);
         let ok = false;
         try {
-            ok = await withTimeout(Core.gp.ads.showRewardedVideo(), 120000);
+            if (Core.pkb) {
+                // PkbSDK: награда только при reward === true в результате show()
+                const ad = Core.pkb.ads && Core.pkb.ads.rewarded;
+                if (ad && ad.isSupported && await ad.canShow()) {
+                    const res = await withTimeout(ad.show(), 120000);
+                    ok = !!(res && res.reward === true);
+                }
+            } else {
+                ok = await withTimeout(Core.gp.ads.showRewardedVideo(), 120000);
+            }
         } catch (e) {
             console.warn('Rewarded:', e);
             ok = false;
@@ -292,22 +352,32 @@
         return !!ok;
     };
     // Полноэкранная реклама: только между партиями и не чаще minInterval сек.
+    // На Пикабу платформа сама не пускает чаще раза в 120 с.
     Core.ads.fullscreen = async function (after) {
-        const minMs = (cfg.fullscreenInterval || 60) * 1000;
-        if (Core.ads.busy || !hasAds('showFullscreen') || Date.now() - Core.ads.lastFullscreen < minMs) {
+        const minSec = Math.max(cfg.fullscreenInterval || 60, Core.pkb ? 120 : 0);
+        const supported = Core.pkb ? !!(Core.pkb.ads && Core.pkb.ads.fullscreen) : hasAds('showFullscreen');
+        if (Core.ads.busy || !supported || Date.now() - Core.ads.lastFullscreen < minSec * 1000) {
             if (after) after();
             return;
         }
         Core.ads.busy = true;
-        Core.ads.lastFullscreen = Date.now();
-        Core.setPause('ad', true);
         try {
-            await withTimeout(Core.gp.ads.showFullscreen(), 60000);
+            if (Core.pkb) {
+                const ad = Core.pkb.ads.fullscreen;
+                if (ad.isSupported && await ad.canShow()) {
+                    Core.ads.lastFullscreen = Date.now();
+                    Core.setPause('ad', true);
+                    try { await withTimeout(ad.show(), 60000); } finally { Core.setPause('ad', false); }
+                }
+            } else {
+                Core.ads.lastFullscreen = Date.now();
+                Core.setPause('ad', true);
+                try { await withTimeout(Core.gp.ads.showFullscreen(), 60000); } finally { Core.setPause('ad', false); }
+            }
         } catch (e) {
             console.warn('Fullscreen:', e);
         } finally {
             Core.ads.busy = false;
-            Core.setPause('ad', false);
         }
         if (after) after();
     };
@@ -471,7 +541,19 @@
 
         global.GameApp = { onSDKReady: onSDKReady };
         if (global.__gpReady && global.gp) onSDKReady(global.gp);
+        loadPikabuSDK();
     };
+
+    // Облачное сохранение: объединяем с локальным (побеждает более свежее)
+    function mergeCloud() {
+        try {
+            const cloud = readCloud();
+            const local = Core.data;
+            const merged = cfg.mergeSaves ? cfg.mergeSaves(local, cloud) : defaultMerge(local, cloud);
+            Core.data = deepMerge(cfg.defaultSave || {}, merged || {});
+            Core.save(true);
+        } catch (e) { console.warn('Cloud load:', e); }
+    }
 
     let sdkInited = false;
     function onSDKReady(gp) {
@@ -481,14 +563,7 @@
         Core.sdkReady = true;
         try { if (gp.language) Core.setLang(gp.language); } catch (e) {}
 
-        // Облачное сохранение
-        try {
-            const cloud = readCloud();
-            const local = Core.data;
-            const merged = cfg.mergeSaves ? cfg.mergeSaves(local, cloud) : defaultMerge(local, cloud);
-            Core.data = deepMerge(cfg.defaultSave || {}, merged || {});
-            Core.save(true);
-        } catch (e) { console.warn('Cloud load:', e); }
+        mergeCloud();
 
         try {
             if (typeof gp.on === 'function') {

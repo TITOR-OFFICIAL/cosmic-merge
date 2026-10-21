@@ -64,34 +64,8 @@
         .score-box .value.best { color: var(--accent); }
     </style>
 
-    <!-- Интеграция GamePush SDK (Проект 31562) -->
-    <script>
-        window.onGPInit = async (gp) => {
-            window.gp = gp;
-            try { await gp.player.ready; } catch (e) { console.warn('GP player ready:', e); }
-            window.__gpReady = true;
-            if (window.GameApp) window.GameApp.onSDKReady(gp);
-        };
-        (function () {
-            var qs = '?projectId=31562&publicToken=FDPK3xsqEIKjF5xjbaEeGmiCB3WShHnc&callback=onGPInit';
-            var urls = [
-                'https://gs.eponesh.com/sdk/game-score.js',
-                'https://s3.gamepush.com/files/gs/sdk/game-score.js',
-                'https://s3-eu.gamepush.com/sdk/game-score.js',
-                'https://gamepush.com/sdk/game-score.js'
-            ];
-            var i = 0;
-            function load() {
-                if (i >= urls.length) return;
-                var s = document.createElement('script');
-                s.async = true;
-                s.src = urls[i++] + qs;
-                s.onerror = function () { s.remove(); load(); };
-                document.head.appendChild(s);
-            }
-            load();
-        })();
-    </script>
+    <!-- Сборка для Пикабу Игр: подключается собственный SDK Пикабу (PkbSDK), GamePush не нужен -->
+    <script>window.PIKABU_BUILD = true;</script>
 </head>
 <body>
 
