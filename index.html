@@ -2,17 +2,19 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <meta name="color-scheme" content="dark">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Космический Мердж</title>
     <link rel="stylesheet" href="core.css">
     <style>
+        :root { color-scheme: dark; }
         /* ---------- Меню ---------- */
         .topbar { width: 100%; display: flex; align-items: center; gap: 8px; }
         .grow { flex: 1; min-width: 0; }
         .menu-logo { margin-top: 5vh; display: flex; flex-direction: column; align-items: center; gap: 6px; }
         .menu-logo canvas { width: 150px; height: 150px; filter: drop-shadow(0 0 30px rgba(120, 160, 255, 0.35)); }
         .menu-title { font-size: 38px; font-weight: 900; text-align: center; line-height: 1.05;
-            background: linear-gradient(90deg, #ffffff, #c9d6ff); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+            color: #eef2ff; }
         .menu-title b { display: block; background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
         .menu-buttons { margin-top: auto; margin-bottom: 5vh; width: 100%; display: flex; flex-direction: column; gap: 12px; }
         .menu-buttons .btn { flex-direction: column; gap: 2px; padding: 13px 16px; }
@@ -71,7 +73,7 @@
 
 <!-- ===== Меню ===== -->
 <div class="screen active" id="scrMenu">
-    <div class="topbar"><div class="grow"></div><button class="icon-btn" data-sound>🔊</button></div>
+    <div class="topbar"><div class="grow"></div><button class="icon-btn" data-lang-toggle style="font-size:13px;font-weight:800;margin-right:8px">RU</button><button class="icon-btn" data-sound>🔊</button></div>
     <div class="menu-logo">
         <canvas id="menuPlanet"></canvas>
         <div class="menu-title" id="menuTitle">Космический<b>Мердж</b></div>

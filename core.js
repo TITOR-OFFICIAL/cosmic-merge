@@ -90,6 +90,14 @@
         const title = Core.t('game_title');
         if (title !== 'game_title') document.title = title;
     };
+    Core.chooseLang = function (l) {
+        try { localStorage.setItem(cfg.id + '_lang', normalizeLang(l)); } catch (e) {}
+        Core.setLang(l);
+        refreshLangButton();
+    };
+    function refreshLangButton() {
+        document.querySelectorAll('[data-lang-toggle]').forEach(b => { b.textContent = Core.lang === 'ru' ? 'RU' : 'EN'; });
+    }
     Core.setLang = function (l) {
         l = normalizeLang(l);
         if (l === Core.lang) return;
@@ -225,7 +233,11 @@
     function onPkbReady(sdk) {
         if (Core.pkb || !sdk) return;
         Core.pkb = sdk;
-        Core.setLang('ru'); // требование Пикабу: по умолчанию русский интерфейс
+        // требование Пикабу: по умолчанию русский интерфейс; выбор игрока (кнопка RU/EN) запоминается
+        let saved = null;
+        try { saved = localStorage.getItem(cfg.id + '_lang'); } catch (e) {}
+        Core.setLang(saved || 'ru');
+        refreshLangButton();
         mergeCloud();
         try { sdk.gameStarted(); } catch (e) { console.warn('PkbSDK gameStarted:', e); }
         if (cfg.onSDKReady) cfg.onSDKReady();
@@ -541,6 +553,17 @@
 
         global.GameApp = { onSDKReady: onSDKReady };
         if (global.__gpReady && global.gp) onSDKReady(global.gp);
+        document.querySelectorAll('[data-lang-toggle]').forEach(b => {
+            if (!global.PIKABU_BUILD) { b.style.display = 'none'; return; }
+            b.addEventListener('click', () => Core.chooseLang(Core.lang === 'ru' ? 'en' : 'ru'));
+        });
+        // Пикабу: сразу русский (или сохранённый выбор), не дожидаясь SDK
+        if (global.PIKABU_BUILD) {
+            let saved = null;
+            try { saved = localStorage.getItem(cfg.id + '_lang'); } catch (e) {}
+            Core.setLang(saved || 'ru');
+            refreshLangButton();
+        }
         loadPikabuSDK();
     };
 
