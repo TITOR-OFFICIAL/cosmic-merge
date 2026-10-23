@@ -401,6 +401,7 @@
     Core.startLoop = function (update, render) {
         let last = performance.now();
         let acc = 0;
+        let lastRender = 0;
         function frame(now) {
             let dt = now - last;
             last = now;
@@ -414,7 +415,12 @@
                 steps++;
             }
             if (steps === 5) acc = 0;
-            render(now);
+            // Картинка меняется только вместе с шагом игры (60 Гц). На экранах 90/120 Гц лишние кадры
+            // не рисуем — они были бы копиями предыдущего; это вдвое снижает нагрузку на таких экранах.
+            if (steps > 0 || now - lastRender > 100) {
+                lastRender = now;
+                render(now);
+            }
             requestAnimationFrame(frame);
         }
         requestAnimationFrame(t => { last = t; requestAnimationFrame(frame); });

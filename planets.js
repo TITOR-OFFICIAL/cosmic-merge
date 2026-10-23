@@ -436,43 +436,157 @@
         const p = PLANETS[level];
         s = {
             surf: makeLayer(p.radius, p.ext, c => paintSurface(c, p, p.radius)),
-            shade: p.shade ? makeLayer(p.radius, 1.1, c => paintShade(c, p, p.radius)) : null
+            shade: p.shade ? makeLayer(p.radius, 1.1, c => paintShade(c, p, p.radius)) : null,
+            // Свечение звёзд рисуется один раз с полной непрозрачностью, а пульсация — это globalAlpha
+            glow: p.star ? makeLayer(p.radius, 1.4, c => paintGlow(c, p, p.radius)) : null
         };
         spriteCache.set(level, s);
         return s;
+    }
+    function glowColor(p) { return p.level === 10 ? '255,190,90' : '170,205,255'; }
+    function paintGlow(c, p, r) {
+        const g = c.createRadialGradient(0, 0, r * 0.9, 0, 0, r * 1.4);
+        g.addColorStop(0, `rgba(${glowColor(p)},1)`);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        c.fillStyle = g;
+        c.beginPath(); c.arc(0, 0, r * 1.4, 0, TAU); c.fill();
     }
     function blit(c, layer, scale) {
         const h = layer.half * scale;
         c.drawImage(layer.cv, -h, -h, h * 2, h * 2);
     }
 
-    function drawPlanet(context, x, y, level, angle, scale) {
-        const p = PLANETS[level] || PLANETS[0];
-        const s = getSprites(p.level);
+    // Пульсирующее свечение звёзд (прозрачность — по времени)
+    function drawGlow(context, x, y, p, scale, sprites) {
+        const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004 + p.level);
+        context.save();
+        context.translate(x, y);
+        context.globalAlpha = p.level === 10 ? 0.25 + pulse * 0.25 : 0.2 + pulse * 0.2;
+        blit(context, sprites.glow, scale);
+        context.restore();
+    }
+
+    // Планета без свечения: кольцо (задняя часть) + поверхность + свет + кольцо (передняя часть)
+    function drawBody(context, x, y, p, sprites, angle, scale) {
         const r = p.radius * scale;
         context.save();
         context.translate(x, y);
-        if (p.star) {
-            // Пульсирующее свечение звёзд
-            const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004 + p.level);
-            const g = context.createRadialGradient(0, 0, r * 0.9, 0, 0, r * 1.4);
-            g.addColorStop(0, p.level === 10 ? `rgba(255,190,90,${(0.25 + pulse * 0.25).toFixed(3)})` : `rgba(170,205,255,${(0.2 + pulse * 0.2).toFixed(3)})`);
-            g.addColorStop(1, 'rgba(0,0,0,0)');
-            context.fillStyle = g;
-            context.beginPath(); context.arc(0, 0, r * 1.4, 0, TAU); context.fill();
-        }
         if (p.ring) drawRing(context, r, angle, false);
         if (p.rotates && angle) {
             context.save();
             context.rotate(angle);
-            blit(context, s.surf, scale);
+            blit(context, sprites.surf, scale);
             context.restore();
         } else {
-            blit(context, s.surf, scale);
+            blit(context, sprites.surf, scale);
         }
-        if (s.shade) blit(context, s.shade, scale);
+        if (sprites.shade) blit(context, sprites.shade, scale);
         if (p.ring) drawRing(context, r, angle, true);
         context.restore();
+    }
+
+    function drawPlanet(context, x, y, level, angle, scale) {
+        const p = PLANETS[level] || PLANETS[0];
+        const s = getSprites(p.level);
+        if (p.star) drawGlow(context, x, y, p, scale, s);
+        drawBody(context, x, y, p, s, angle, scale);
+    }
+
+    // ===== Кэш «покоящихся» планет =====
+    // Планета, которая несколько кадров подряд стоит на месте, один раз рисуется целиком (поверхность, свет, кольцо, лёд)
+    // в отдельный спрайт, выровненный по пикселям экрана. Дальше в кадре — один быстрый drawImage вместо двух-четырёх
+    // с поворотом и сглаживанием. Картинка та же; на слабых устройствах это в разы дешевле.
+    const REST_FRAMES = 4;
+    const REST_EPS2 = 0.0001;       // допуск по положению (квадрат, в единицах поля)
+    const REST_ANGLE_EPS = 0.001;
+    const POOL_MAX = 4;
+    const restInfo = new Map();     // шар -> состояние покоя и готовый спрайт
+    const compPool = new Map();     // размер -> свободные canvas
+    let frameStamp = 0;
+
+    function takeCanvas(size) {
+        const list = compPool.get(size);
+        if (list && list.length) return list.pop();
+        const cv = document.createElement('canvas');
+        cv.width = size; cv.height = size;
+        return cv;
+    }
+    function giveCanvas(cv) {
+        let list = compPool.get(cv.width);
+        if (!list) { list = []; compPool.set(cv.width, list); }
+        if (list.length < POOL_MAX) list.push(cv);
+    }
+    function dropComp(e) {
+        if (e.comp) { giveCanvas(e.comp.cv); e.comp = null; }
+    }
+
+    function buildComp(e, p, sx, sy, overlay, b) {
+        const ext = p.ring ? RING_OUTER : Math.max(p.ext, 1.12);
+        const half = Math.ceil(ext * p.radius * Math.max(sx, sy)) + 3;
+        const size = half * 2 + 2;
+        const dX = e.lx * sx, dY = e.ly * sy;
+        const ix = Math.floor(dX), iy = Math.floor(dY);
+        const cv = takeCanvas(size);
+        const cc = cv.getContext('2d');
+        cc.setTransform(1, 0, 0, 1, 0, 0);
+        cc.clearRect(0, 0, size, size);
+        // Дробная часть положения «запекается» в спрайт, поэтому на экране картинка точно там же, где была бы
+        cc.setTransform(sx, 0, 0, sy, half + (dX - ix), half + (dY - iy));
+        drawBody(cc, 0, 0, p, getSprites(p.level), e.la, 1);
+        if (overlay) overlay(cc, b, 0, 0, e.la);
+        cc.setTransform(1, 0, 0, 1, 0, 0);
+        return { cv, px: ix - half, py: iy - half, sx, sy };
+    }
+
+    function beginFrame() { frameStamp++; }
+    // Освободить спрайты шаров, которых больше нет на поле
+    function endFrame() {
+        restInfo.forEach((e, b) => {
+            if (e.seen !== frameStamp) { dropComp(e); restInfo.delete(b); }
+        });
+    }
+
+    /*
+     * Нарисовать шар поля. c — контекст с трансформацией «поле -> пиксели» (sx, sy — её масштабы, сдвига нет).
+     * cacheOk=false (идёт тряска экрана) — всегда рисуем напрямую.
+     * overlay(c, b, x, y, angle) — надстройка поверх планеты (лёд), входит в кэш.
+     */
+    function drawBall(c, b, sx, sy, cacheOk, overlay) {
+        const p = PLANETS[b.level] || PLANETS[0];
+        let e = restInfo.get(b);
+        if (!e) {
+            e = { st: 0, lx: b.x, ly: b.y, la: b.angle, fz: b.frozen, lvl: b.level, comp: null, seen: 0 };
+            restInfo.set(b, e);
+        }
+        e.seen = frameStamp;
+        const dx = b.x - e.lx, dy = b.y - e.ly;
+        if (dx * dx + dy * dy > REST_EPS2 || Math.abs(b.angle - e.la) > REST_ANGLE_EPS || b.frozen !== e.fz || b.level !== e.lvl) {
+            e.lx = b.x; e.ly = b.y; e.la = b.angle; e.fz = b.frozen; e.lvl = b.level;
+            e.st = 0;
+            dropComp(e);
+        } else {
+            e.st++;
+        }
+        if (cacheOk && e.st >= REST_FRAMES) {
+            let comp = e.comp;
+            if (comp && (comp.sx !== sx || comp.sy !== sy)) { dropComp(e); comp = null; }
+            if (!comp) comp = e.comp = buildComp(e, p, sx, sy, overlay, b);
+            c.setTransform(1, 0, 0, 1, 0, 0);
+            if (p.star) {
+                // Мягкое свечение: сдвиг на долю пикселя незаметен, поэтому кладём его по целым пикселям (быстрый путь)
+                const glow = getSprites(p.level).glow;
+                const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004 + p.level);
+                c.globalAlpha = p.level === 10 ? 0.25 + pulse * 0.25 : 0.2 + pulse * 0.2;
+                c.drawImage(glow.cv, Math.round(b.x * sx - glow.cv.width / 2), Math.round(b.y * sy - glow.cv.height / 2));
+                c.globalAlpha = 1;
+            }
+            c.drawImage(comp.cv, comp.px, comp.py);
+            c.setTransform(sx, 0, 0, sy, 0, 0);
+            return;
+        }
+        if (!cacheOk) dropComp(e);
+        drawPlanet(c, b.x, b.y, b.level, b.angle, 1);
+        if (overlay) overlay(c, b, b.x, b.y, b.angle);
     }
 
     // Мини-превью (следующая планета и шкала эволюции)
@@ -498,6 +612,14 @@
     root.Planets = {
         PLANETS,
         drawPlanet,
+        drawBall,
+        beginFrame,
+        endFrame,
+        // Сбросить все кэши (при изменении размера canvas)
+        resetRestCache() {
+            restInfo.forEach(dropComp);
+            compPool.clear();
+        },
         paintMini,
         visualExtent,
         // Вызывать при изменении масштаба canvas: спрайты перерисуются в нужном разрешении
@@ -505,6 +627,8 @@
             if (Math.abs(rs - RS) > 0.01) {
                 RS = rs;
                 spriteCache.clear();
+                restInfo.forEach(dropComp);
+                compPool.clear();
                 return true;
             }
             return false;

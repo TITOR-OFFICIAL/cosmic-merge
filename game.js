@@ -91,7 +91,18 @@
         drop: () => Core.sfx.tone(260, 'sine', 0.11, 0.12, 140),
         merge: l => { const b = 240 + l * 55; Core.sfx.tone(b, 'triangle', 0.18, 0.18, b * 1.45); },
         laser: () => Core.sfx.tone(720, 'sawtooth', 0.25, 0.15, 110),
-        shake: () => Core.sfx.tone(120, 'square', 0.28, 0.12, 220)
+        shake: () => {
+            Core.sfx.tone(120, 'square', 0.28, 0.12, 220);
+            Core.sfx.tone(70, 'sawtooth', 0.7, 0.14, 35, 0.02);
+            // Дребезг: серия коротких ударов в случайные моменты
+            for (let i = 0; i < 7; i++) Core.sfx.tone(160 + Math.random() * 280, 'square', 0.07, 0.07, null, 0.05 + i * 0.09 + Math.random() * 0.04);
+        },
+        boom: () => {
+            Core.sfx.tone(90, 'sawtooth', 0.5, 0.18, 40);
+            Core.sfx.tone(52, 'square', 0.95, 0.2, 24);
+            Core.sfx.tone(300, 'sawtooth', 0.28, 0.1, 60);
+            for (let i = 0; i < 6; i++) Core.sfx.tone(140 + Math.random() * 240, 'square', 0.08, 0.06, null, 0.12 + i * 0.1 + Math.random() * 0.05);
+        }
     };
 
     // ======================================================================
@@ -245,6 +256,9 @@
         world = P.makeWorld();
         particles = [];
         floats = [];
+        waves = [];
+        flash = 0;
+        shakeScreen = 0;
         combo = P.makeCombo();
         dropsUsed = 0;
         score = 0;
@@ -366,13 +380,26 @@
             Core.sfx.tone(300, 'sine', 0.3, 0.1, 80);
         },
         explode: (x, y) => {
-            spawnParticles(x, y, '#ffb347', 40);
-            spawnParticles(x, y, '#ffffff', 16);
-            Core.sfx.tone(90, 'sawtooth', 0.5, 0.18, 40);
-            shakeScreen = 14;
+            spawnParticles(x, y, '#ffb347', 90, 2.3);
+            spawnParticles(x, y, '#ff6a2f', 50, 1.6);
+            spawnParticles(x, y, '#ffffff', 40, 3);
+            waves.push({ x, y, life: 0 }, { x, y, life: -7 });
+            flash = 9;
+            snd.boom();
+            kickScreen(SCREEN_SHAKE_AMP, 70);
         }
     };
-    let shakeScreen = 0;
+
+    // Тряска экрана: kickScreen(амплитуда в px поля, длительность в кадрах). Затухает к концу.
+    const SCREEN_SHAKE_AMP = 19;
+    let shakeScreen = 0, shakeMax = 1, shakeAmp = 0;
+    function kickScreen(amp, frames) {
+        const cur = shakeScreen > 0 ? shakeAmp * Math.pow(shakeScreen / shakeMax, 1.3) : 0;
+        shakeAmp = Math.max(amp, cur);
+        shakeScreen = shakeMax = frames;
+    }
+    let waves = [];      // кольца ударной волны взрыва
+    let flash = 0;       // белая вспышка при взрыве (кадров)
 
     function dropNow() {
         if (!canPlayNow() || !canDrop || laserMode || winTimer >= 0) return;
@@ -407,9 +434,11 @@
         updateHud();
     }
 
-    function spawnParticles(x, y, color, count) {
-        for (let i = 0; i < count; i++) {
-            const a = Math.random() * TAU, s = Math.random() * 4.5 + 1.2;
+    const MAX_PARTICLES = 320;   // страховка для слабых устройств
+    function spawnParticles(x, y, color, count, speed) {
+        const k = speed || 1;
+        for (let i = 0; i < count && particles.length < MAX_PARTICLES; i++) {
+            const a = Math.random() * TAU, s = (Math.random() * 4.5 + 1.2) * k;
             particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, r: Math.random() * 4 + 2, color, alpha: 1 });
         }
     }
@@ -432,6 +461,10 @@
             if (--floats[i].life <= 0) floats.splice(i, 1);
         }
         if (shakeScreen > 0) shakeScreen--;
+        if (flash > 0) flash--;
+        for (let i = waves.length - 1; i >= 0; i--) {
+            if (++waves[i].life > 30) waves.splice(i, 1);
+        }
         if (!canPlayNow()) return;
 
         if (!canDrop && --dropCooldown <= 0) canDrop = true;
@@ -505,7 +538,7 @@
         c.beginPath(); c.arc(0, 0, r + 4, 0, TAU); c.stroke();
         c.restore();
     }
-    function drawHole(c, h, t) {
+    function drawHoleGlow(c, h) {
         const [x, y] = h;
         const R = P.HOLE_PULL_R;
         const g = c.createRadialGradient(x, y, P.HOLE_HORIZON, x, y, R);
@@ -513,6 +546,13 @@
         g.addColorStop(1, 'rgba(120,60,200,0)');
         c.fillStyle = g;
         c.beginPath(); c.arc(x, y, R, 0, TAU); c.fill();
+    }
+    function drawHole(c, h, t) {
+        drawHoleGlow(c, h);
+        drawHoleDisk(c, h, t);
+    }
+    function drawHoleDisk(c, h, t) {
+        const [x, y] = h;
         // Аккреционный диск
         c.save();
         c.translate(x, y);
@@ -598,21 +638,104 @@
     // ======================================================================
     // Отрисовка
     // ======================================================================
+    // Неподвижные детали поля (свечение дыр, стены, астероиды) рисуются один раз в слои по пикселям экрана
+    let stat = null;
+    function makeLayer(x0, y0, x1, y1, paint) {
+        const sx = canvas.width / W, sy = canvas.height / H;
+        const dx0 = Math.max(0, Math.floor(x0 * sx)), dy0 = Math.max(0, Math.floor(y0 * sy));
+        const dx1 = Math.min(canvas.width, Math.ceil(x1 * sx)), dy1 = Math.min(canvas.height, Math.ceil(y1 * sy));
+        if (dx1 <= dx0 || dy1 <= dy0) return null;
+        const cv = document.createElement('canvas');
+        cv.width = dx1 - dx0; cv.height = dy1 - dy0;
+        const c = cv.getContext('2d');
+        c.setTransform(sx, 0, 0, sy, -dx0, -dy0);
+        paint(c);
+        return { cv, px: dx0, py: dy0 };
+    }
+    function ensureStatic() {
+        if (stat && stat.pegs === world.pegs && stat.walls === world.walls && stat.holes === world.holes &&
+            stat.cw === canvas.width && stat.ch === canvas.height) return stat;
+        const R = P.HOLE_PULL_R;
+        stat = {
+            pegs: world.pegs, walls: world.walls, holes: world.holes, cw: canvas.width, ch: canvas.height,
+            glows: world.holes.map(h => makeLayer(h[0] - R - 2, h[1] - R - 2, h[0] + R + 2, h[1] + R + 2, c => drawHoleGlow(c, h))),
+            solid: null
+        };
+        if (world.walls.length || world.pegs.length) {
+            let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+            const grow = (x, y, m) => { x0 = Math.min(x0, x - m); y0 = Math.min(y0, y - m); x1 = Math.max(x1, x + m); y1 = Math.max(y1, y + m); };
+            world.walls.forEach(w => { grow(w[0], w[1], 12); grow(w[2], w[3], 12); });
+            world.pegs.forEach(p => grow(p[0], p[1], p[2] + 16));
+            stat.solid = makeLayer(x0, y0, x1, y1, c => {
+                world.walls.forEach(w => drawWall(c, w));
+                world.pegs.forEach(p => drawPeg(c, p));
+            });
+        }
+        return stat;
+    }
+    function blitLayer(l) {
+        if (l) ctx.drawImage(l.cv, l.px, l.py);
+    }
+
+    function overlayBall(c, b, x, y, angle) {
+        if (b.frozen) drawIce(c, x, y, b.radius, angle * 0.3);
+    }
+
+    // Тряска экрана — это CSS-трансформация самого canvas (сдвиг + поворот): браузер двигает готовую картинку,
+    // ничего не перерисовывается, поэтому она почти бесплатна даже на слабых устройствах.
+    const wrapEl = $('#wrap');
+    let shakeApplied = false;
+    function applyScreenShake() {
+        if (shakeScreen > 0) {
+            // Хаотично: случайный сдвиг и небольшой поворот каждый кадр, иногда — резкий «удар»
+            let a = shakeAmp * Math.pow(shakeScreen / shakeMax, 1.3);
+            if (Math.random() < 0.14) a *= 1.7;
+            const k = canvas.clientWidth / W;          // px экрана на единицу поля
+            const dx = (Math.random() - 0.5) * 2 * a * k, dy = (Math.random() - 0.5) * 2 * a * k;
+            const rot = (Math.random() - 0.5) * 2 * a * 0.0021;
+            if (!shakeApplied) { wrapEl.style.overflow = 'visible'; shakeApplied = true; }
+            canvas.style.transform = `translate(${dx.toFixed(1)}px,${dy.toFixed(1)}px) rotate(${rot.toFixed(4)}rad)`;
+        } else if (shakeApplied) clearScreenShake();
+    }
+    function clearScreenShake() {
+        shakeApplied = false;
+        canvas.style.transform = '';
+        wrapEl.style.overflow = '';
+    }
+
+    let modalFrames = 0, drawnW = 0, drawnH = 0;
     function render(now) {
-        if (Core.currentScreen !== 'scrGame') return;
+        if (Core.currentScreen !== 'scrGame') { if (shakeApplied) clearScreenShake(); return; }
+        // Пока открыто окно (цель, итог, выход), поле под ним не меняется — перерисовываем только пару кадров
+        if (Core.anyModalOpen()) {
+            if (shakeApplied) clearScreenShake();
+            if (modalFrames >= 3 && canvas.width === drawnW && canvas.height === drawnH) return;
+            modalFrames++;
+        } else modalFrames = 0;
+        if (drawnW && (canvas.width !== drawnW || canvas.height !== drawnH)) PL.resetRestCache();
+        drawnW = canvas.width; drawnH = canvas.height;
+
         const t = (now || performance.now()) / 1000;
+        const sx = canvas.width / W, sy = canvas.height / H;
+        applyScreenShake();
         view.begin(ctx);
         ctx.clearRect(0, 0, W, H);
-        if (shakeScreen > 0) ctx.translate((Math.random() - 0.5) * shakeScreen * 0.6, (Math.random() - 0.5) * shakeScreen * 0.6);
 
+        ctx.fillStyle = '#fff';
         for (const s of bgStars) {
-            ctx.fillStyle = `rgba(255,255,255,${s.a.toFixed(3)})`;
+            ctx.globalAlpha = s.a;
             ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.fill();
         }
+        ctx.globalAlpha = 1;
 
-        for (const h of world.holes) drawHole(ctx, h, t);
-        for (const w of world.walls) drawWall(ctx, w);
-        for (const p of world.pegs) drawPeg(ctx, p);
+        const st = ensureStatic();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        for (const l of st.glows) blitLayer(l);
+        ctx.setTransform(sx, 0, 0, sy, 0, 0);
+        for (const h of world.holes) drawHoleDisk(ctx, h, t);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        blitLayer(st.solid);
+        ctx.setTransform(sx, 0, 0, sy, 0, 0);
 
         // Линия опасности
         ctx.save();
@@ -639,11 +762,11 @@
             if (currentMagnet) drawMagnetRing(ctx, x, DROP_Y, r, t * 1.5, 3);
         }
 
+        PL.beginFrame();
         for (const b of world.balls) {
             if (b.kind === 'bomb') drawBomb(ctx, b, t);
             else {
-                PL.drawPlanet(ctx, b.x, b.y, b.level, b.angle, 1);
-                if (b.frozen) drawIce(ctx, b.x, b.y, b.radius, b.angle * 0.3);
+                PL.drawBall(ctx, b, sx, sy, true, overlayBall);
                 if (b.magnet) drawMagnetRing(ctx, b.x, b.y, b.radius, t * 1.5, 3);
             }
             if (laserMode) {
@@ -653,12 +776,30 @@
             }
         }
 
+        PL.endFrame();
+
+        let lastColor = null;
         for (const p of particles) {
             ctx.globalAlpha = Math.max(0, p.alpha);
-            ctx.fillStyle = p.color;
+            if (p.color !== lastColor) { ctx.fillStyle = p.color; lastColor = p.color; }
             ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
         }
         ctx.globalAlpha = 1;
+
+        // Ударная волна взрыва
+        for (const w of waves) {
+            if (w.life <= 0) continue;
+            const k = w.life / 30;
+            ctx.globalAlpha = (1 - k) * 0.85;
+            ctx.strokeStyle = '#ffd9a0';
+            ctx.lineWidth = 10 * (1 - k) + 1.5;
+            ctx.beginPath(); ctx.arc(w.x, w.y, 14 + k * 300, 0, TAU); ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+        if (flash > 0) {
+            ctx.fillStyle = `rgba(255,236,200,${(flash / 9 * 0.32).toFixed(3)})`;
+            ctx.fillRect(-40, -40, W + 80, H + 80);
+        }
 
         // Надписи комбо
         ctx.textAlign = 'center';
@@ -889,7 +1030,13 @@
     $('#btnShake').onclick = () => {
         if (!boosterAllowed()) return;
         if (!world.balls.length) { Core.toast(Core.t('toast_no_planets')); return; }
-        const apply = () => { snd.shake(); P.shake(world, Math.random); updateBoostersUI(); };
+        const apply = () => {
+            snd.shake();
+            P.shake(world, Math.random);
+            kickScreen(SCREEN_SHAKE_AMP, 75);
+            for (const b of world.balls) spawnParticles(b.x, b.y, b.kind === 'bomb' ? '#ffb347' : PL.PLANETS[b.level].color1, 3, 1.8);
+            updateBoostersUI();
+        };
         const b = Core.data.boosters;
         if (b.shake > 0) { b.shake--; Core.save(false); apply(); }
         else Core.ads.rewarded(apply);

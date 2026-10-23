@@ -29,13 +29,19 @@
     const HOLE_MAX_ABSORB = 2;     // поглощает только мелочь: метеориты, луны, меркурии
     const MAGNET_R = 150;
     const BOMB_R = 20;
-    const BOMB_BLAST_R = 150;
+    const BOMB_BLAST_R = 250;      // радиус сильного радиального толчка (слабее — дальше, но достаёт почти всё поле)
     const BOMB_THAW_R = 70;        // взрыв размораживает только лёд рядом
+    const SPEED_MAX = 30;          // предел скорости за один шаг: страховка от пролёта сквозь стены/астероиды
+    const QUAKE_SHAKE_FRAMES = 70; // длительность «землетрясения» после встряски
+    const QUAKE_BOMB_FRAMES = 55;  // и после взрыва звезды
+    const TAU = Math.PI * 2;
     const COMBO_FRAMES = 75;       // 1.25 сек между слияниями для продолжения комбо
     const COMBO_MAX = 5;
 
     function makeWorld() {
-        return { balls: [], pegs: [], walls: [], holes: [], dangerTimer: 0, shakeTime: -1 };
+        // quake* — «землетрясение»: пока quake > 0, поле хаотично швыряет планеты (см. applyQuake).
+        // rnd — генератор для хаоса (по умолчанию Math.random; симуляция подставляет детерминированный)
+        return { balls: [], pegs: [], walls: [], holes: [], dangerTimer: 0, shakeTime: -1, quake: 0, quakeAmp: 0, quakeLen: 1, gustT: 0, gx: 0, gy: 0, rnd: null };
     }
 
     function makeBall(level, x, y, vx, vy, age) {
@@ -138,12 +144,21 @@
             }
         }
 
+        if (world.quake > 0) applyQuake(world);
+
+        let removed = false;   // были ли слияния/поглощения — тогда нужно убрать merged-шары из массива
         for (let i = 0; i < balls.length; i++) {
             const b = balls[i];
             b.px = b.x;
             b.vy += gravity;
             b.vx *= friction;
             b.vy *= friction;
+            const sp2 = b.vx * b.vx + b.vy * b.vy;
+            if (sp2 > SPEED_MAX * SPEED_MAX) {
+                const k = SPEED_MAX / Math.sqrt(sp2);
+                b.vx *= k;
+                b.vy *= k;
+            }
             // Медленные планеты дополнительно гасим — так они быстрее успокаиваются и не «плывут»
             if (b.vx * b.vx + b.vy * b.vy < 0.5) b.vx *= 0.9;
             b.x += b.vx;
@@ -160,12 +175,13 @@
                     const dx = b.x - h[0], dy = b.y - h[1];
                     if (dx * dx + dy * dy < Math.pow(HOLE_HORIZON + b.radius * 0.45, 2)) {
                         b.merged = true;
+                        removed = true;
                         if (ev && ev.absorb) ev.absorb(b);
                         break;
                     }
                 }
             }
-            balls = balls.filter(b => !b.merged);
+            if (removed) { compact(balls); removed = false; }
         }
 
         for (let iter = 0; iter < 6; iter++) {
@@ -219,6 +235,7 @@
                         const nb = makeBall(lvl, Math.max(r, Math.min(W - r, mx)), Math.min(H - r, my), (a.vx + b.vx) * 0.4, -1.8, 30);
                         nb.angle = (a.angle + b.angle) * 0.5;
                         balls.push(nb);
+                        removed = true;
                         // Слияние рядом размораживает лёд
                         for (const c of balls) {
                             if (!c.frozen || c.merged) continue;
@@ -262,7 +279,7 @@
                     }
                 }
             }
-            balls = balls.filter(b => !b.merged);
+            if (removed) { compact(balls); removed = false; }
         }
         // Вращение как у катящегося шара: по фактическому смещению, мелкие подрагивания не крутят планету
         for (const b of balls) {
@@ -271,6 +288,43 @@
             if (Math.abs(dx) > 0.35) b.angle += dx / b.radius;
         }
         world.balls = balls;
+    }
+
+    // Убрать слитые шары из массива «на месте» (порядок сохраняется, новых массивов не создаём)
+    function compact(arr) {
+        let j = 0;
+        for (let i = 0; i < arr.length; i++) {
+            const b = arr[i];
+            if (!b.merged) arr[j++] = b;
+        }
+        arr.length = j;
+    }
+
+    // «Землетрясение»: каждый кадр поле резко меняет направление тряски (порывы по 2–6 кадров),
+    // плюс отдельные планеты получают случайные пинки. К концу затухает.
+    function applyQuake(world) {
+        const rnd = world.rnd || Math.random;
+        const left = world.quake--;
+        const amp = world.quakeAmp * (0.3 + 0.7 * Math.min(1, left / (world.quakeLen * 0.5)));
+        if (--world.gustT <= 0) {
+            world.gustT = 2 + Math.floor(rnd() * 5);
+            const a = rnd() * TAU;
+            const m = (0.6 + rnd() * 0.9) * amp;
+            world.gx = Math.cos(a) * m * 1.7;
+            world.gy = Math.sin(a) * m * 1.2 - 0.45 * amp;   // небольшой перекос вверх: поле «подбрасывает»
+        }
+        const balls = world.balls;
+        for (let i = 0; i < balls.length; i++) {
+            const b = balls[i];
+            const k = 0.5 + rnd() * 1.0;
+            b.vx += world.gx * k;
+            b.vy += world.gy * k;
+            if (rnd() < 0.07) {
+                const a = rnd() * TAU, m = (3 + rnd() * 8) * amp;
+                b.vx += Math.cos(a) * m;
+                b.vy += Math.sin(a) * m - 0.4 * m;
+            }
+        }
     }
 
     // Вызывается после каждого броска игрока: тикают звёзды-бомбы. ev.explode(x, y)
@@ -282,30 +336,50 @@
         }
     }
     function explode(world, bomb, ev) {
+        const rnd = world.rnd || Math.random;
         world.balls = world.balls.filter(b => b !== bomb);
         for (const b of world.balls) {
             const dx = b.x - bomb.x, dy = b.y - bomb.y;
             const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-            if (d < BOMB_BLAST_R + b.radius) {
-                const k = 1 - d / (BOMB_BLAST_R + b.radius);
-                b.vx += dx / d * 13 * k;
-                b.vy += dy / d * 13 * k - 3 * k;
-                if (b.frozen && d < BOMB_THAW_R + b.radius) {
-                    b.frozen = false;
-                    if (ev && ev.thaw) ev.thaw(b);
-                }
+            // Радиальный толчок: у центра ~30, на краю поля всё ещё ~10 — и каждому шару с разбросом
+            const k = Math.max(0, 1 - d / (BOMB_BLAST_R + b.radius));
+            const f = (10 + 22 * k) * (0.7 + rnd() * 0.6);
+            b.vx += dx / d * f;
+            b.vy += dy / d * f - 4 - 6 * k;
+            // Хаос поверх радиальной волны: случайный пинок в любую сторону
+            const a = rnd() * TAU, m = (4 + rnd() * 10) * (0.5 + 0.5 * k);
+            b.vx += Math.cos(a) * m;
+            b.vy += Math.sin(a) * m;
+            if (b.frozen && d < BOMB_THAW_R + b.radius) {
+                b.frozen = false;
+                if (ev && ev.thaw) ev.thaw(b);
             }
         }
+        startQuake(world, 0.95, QUAKE_BOMB_FRAMES);
         world.shakeTime = 0;   // разлёт после взрыва не считается поражением
         world.dangerTimer = 0;
         if (ev && ev.explode) ev.explode(bomb.x, bomb.y);
     }
 
+    function startQuake(world, amp, frames) {
+        world.quake = frames;
+        world.quakeLen = frames;
+        world.quakeAmp = amp;
+        world.gustT = 0;
+    }
+
+    // Встряска: сильный разнонаправленный бросок каждой планеты + «землетрясение» поля
     function shake(world, rnd) {
+        world.rnd = rnd || world.rnd;
+        const r = rnd || Math.random;
         world.balls.forEach(b => {
-            b.vy = -rnd() * 9 - 4;
-            b.vx = (rnd() - 0.5) * 12;
+            // Направление — в основном вверх, но с большим разбросом (вплоть до боковых и чуть вниз)
+            const a = -Math.PI / 2 + (r() * 2 - 1) * Math.PI * 0.85;
+            const s = 14 + r() * 18;
+            b.vx = Math.cos(a) * s;
+            b.vy = Math.sin(a) * s;
         });
+        startQuake(world, 1.0, QUAKE_SHAKE_FRAMES);
         world.shakeTime = 0;
         world.dangerTimer = 0;
     }
@@ -338,6 +412,7 @@
         world.balls = world.balls.filter(b => b.y > H * 0.52);
         world.dangerTimer = 0;
         world.shakeTime = -1;
+        world.quake = 0;
     }
 
     // Комбо: слияния подряд с интервалом < COMBO_FRAMES умножают очки (до ×5)
