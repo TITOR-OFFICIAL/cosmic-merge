@@ -41,14 +41,19 @@
     function makeWorld() {
         // quake* — «землетрясение»: пока quake > 0, поле хаотично швыряет планеты (см. applyQuake).
         // rnd — генератор для хаоса (по умолчанию Math.random; симуляция подставляет детерминированный)
-        return { balls: [], pegs: [], walls: [], holes: [], dangerTimer: 0, shakeTime: -1, quake: 0, quakeAmp: 0, quakeLen: 1, gustT: 0, gx: 0, gy: 0, rnd: null };
+        return { balls: [], pegs: [], walls: [], holes: [], dangerTimer: 0, shakeTime: -1, quake: 0, quakeAmp: 0, quakeLen: 1, gustT: 0, gx: 0, gy: 0, rnd: null, wave: null, quakeMass: false };
     }
 
+    // Подвижность: лёгкие планеты от одного и того же толчка улетают быстрее тяжёлых (масса ~ радиус²,
+    // берём смягчённую зависимость, чтобы большие планеты тоже заметно двигались)
+    function mobility(radius) {
+        return Math.max(0.4, Math.min(1.7, Math.pow(34 / radius, 0.85)));
+    }
     function makeBall(level, x, y, vx, vy, age) {
-        return { x, y, vx, vy, level, radius: RADII[level], angle: 0, age, merged: false, frozen: false, magnet: false, kind: null };
+        return { x, y, vx, vy, level, radius: RADII[level], angle: 0, age, merged: false, frozen: false, magnet: false, kind: null, mf: mobility(RADII[level]), wp: 0 };
     }
     function makeBomb(x, y, fuse) {
-        return { x, y, vx: 0, vy: 0, level: -1, radius: BOMB_R, angle: 0, age: 0, merged: false, frozen: false, magnet: false, kind: 'bomb', fuse };
+        return { x, y, vx: 0, vy: 0, level: -1, radius: BOMB_R, angle: 0, age: 0, merged: false, frozen: false, magnet: false, kind: 'bomb', fuse, mf: mobility(BOMB_R), wp: 0 };
     }
 
     function clampDropX(level, x) {
@@ -144,6 +149,7 @@
             }
         }
 
+        if (world.wave) advanceWave(world);
         if (world.quake > 0) applyQuake(world);
 
         let removed = false;   // были ли слияния/поглощения — тогда нужно убрать merged-шары из массива
@@ -316,11 +322,11 @@
         const balls = world.balls;
         for (let i = 0; i < balls.length; i++) {
             const b = balls[i];
-            const k = 0.5 + rnd() * 1.0;
+            const k = (0.5 + rnd() * 1.0) * (world.quakeMass ? b.mf : 1);
             b.vx += world.gx * k;
             b.vy += world.gy * k;
             if (rnd() < 0.07) {
-                const a = rnd() * TAU, m = (3 + rnd() * 8) * amp;
+                const a = rnd() * TAU, m = (3 + rnd() * 8) * amp * (world.quakeMass ? b.mf : 1);
                 b.vx += Math.cos(a) * m;
                 b.vy += Math.sin(a) * m - 0.4 * m;
             }
@@ -362,26 +368,52 @@
     }
 
     function startQuake(world, amp, frames) {
+        world.quakeMass = false;
         world.quake = frames;
         world.quakeLen = frames;
         world.quakeAmp = amp;
         world.gustT = 0;
     }
 
-    // Встряска: сильный разнонаправленный бросок каждой планеты + «землетрясение» поля
+    // Встряска — подземный толчок: из случайной точки под полем идёт ударная волна (WAVE_SPEED пикселей за кадр).
+    // Когда фронт доходит до планеты, она получает импульс «от эпицентра» (с хаотичным отклонением); чем дальше
+    // от эпицентра — тем слабее, чем планета тяжелее — тем медленнее разгоняется. Нижние планеты взлетают первыми,
+    // волна бежит вверх по полю. Сверху идёт «землетрясение» (порывы + пинки), тоже зависящее от массы.
+    const WAVE_SPEED = 15;
     function shake(world, rnd) {
         world.rnd = rnd || world.rnd;
         const r = rnd || Math.random;
-        world.balls.forEach(b => {
-            // Направление — в основном вверх, но с большим разбросом (вплоть до боковых и чуть вниз)
-            const a = -Math.PI / 2 + (r() * 2 - 1) * Math.PI * 0.85;
-            const s = 14 + r() * 18;
-            b.vx = Math.cos(a) * s;
-            b.vy = Math.sin(a) * s;
-        });
+        world.wave = { x: W * (0.2 + r() * 0.6), y: H + 30, r: 0, id: 1 };
+        for (const b of world.balls) b.wp = 1;
         startQuake(world, 1.0, QUAKE_SHAKE_FRAMES);
+        world.quakeMass = true;
         world.shakeTime = 0;
         world.dangerTimer = 0;
+        advanceWave(world);   // нижние планеты получают толчок сразу
+    }
+    function advanceWave(world) {
+        const w = world.wave;
+        const r = world.rnd || Math.random;
+        w.r += WAVE_SPEED;
+        const balls = world.balls;
+        let pending = 0;
+        for (let i = 0; i < balls.length; i++) {
+            const b = balls[i];
+            if (b.wp !== 1) continue;
+            const dx = b.x - w.x, dy = b.y - w.y;
+            const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            if (d - b.radius > w.r) { pending++; continue; }
+            b.wp = 0;
+            // 70 % — направление от эпицентра, 30 % — случайное: рассыпается веером, но не одинаково
+            const a = r() * TAU;
+            let ux = dx / d * 0.7 + Math.cos(a) * 0.3;
+            let uy = dy / d * 0.7 + Math.sin(a) * 0.3;
+            const ul = Math.sqrt(ux * ux + uy * uy) || 1;
+            const power = (22 + r() * 20) * (1 - 0.4 * Math.min(1, d / 600)) * b.mf;
+            b.vx += ux / ul * power;
+            b.vy += uy / ul * power;
+        }
+        if (!pending) { world.wave = null; }
     }
 
     function updateDanger(world) {
@@ -413,6 +445,7 @@
         world.dangerTimer = 0;
         world.shakeTime = -1;
         world.quake = 0;
+        world.wave = null;
     }
 
     // Комбо: слияния подряд с интервалом < COMBO_FRAMES умножают очки (до ×5)

@@ -87,22 +87,61 @@
     // ======================================================================
     // Звуки игры
     // ======================================================================
+    // Взрыв без файлов: щелчок шума (фильтр быстро «закрывается»), низкий удар, гул и треск осколков.
+    // Один общий буфер шума на аудио-контекст (после рекламы контекст пересоздаётся — буфер тоже).
+    let noiseCtx = null, noiseBuf = null;
+    function noiseBuffer(ctx) {
+        if (noiseCtx !== ctx) {
+            noiseCtx = ctx;
+            const len = Math.floor(ctx.sampleRate * 1.6);
+            noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+            const ch = noiseBuf.getChannelData(0);
+            let last = 0;
+            for (let i = 0; i < len; i++) { const w = Math.random() * 2 - 1; last = last * 0.55 + w * 0.45; ch[i] = last; }   // чуть тёмный шум
+        }
+        return noiseBuf;
+    }
+    function noiseBurst(ctx, t0, dur, vol, f0, f1, type, q) {
+        const src = ctx.createBufferSource();
+        src.buffer = noiseBuffer(ctx);
+        const f = ctx.createBiquadFilter();
+        f.type = type || 'lowpass';
+        f.Q.value = q || 0.7;
+        f.frequency.setValueAtTime(f0, t0);
+        f.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t0 + dur);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(vol, t0 + 0.012);
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+        src.connect(f); f.connect(g); g.connect(ctx.destination);
+        src.start(t0, Math.random() * 0.3, dur + 0.05);
+    }
+    function explosion(power) {
+        const s = Core.sfx;
+        if (s.muted || s.bgPaused) return;
+        s.init();
+        const ctx = s.ctx;
+        if (!ctx) return;
+        try {
+            const t = ctx.currentTime + 0.005;
+            noiseBurst(ctx, t, 0.35, 0.42 * power, 5200, 260);                 // резкий хлопок
+            noiseBurst(ctx, t + 0.02, 1.25 * power, 0.4 * power, 520, 70);      // раскатистый гул
+            s.tone(95 * (power > 1 ? 0.85 : 1), 'sine', 0.85 * power, 0.38, 28);  // низкий удар
+            s.tone(190, 'triangle', 0.3, 0.16, 45);
+            // Осколки: серия коротких щелчков, затихающая к концу
+            const n = Math.round(10 + 4 * power);
+            for (let i = 0; i < n; i++) {
+                const k = i / n;
+                noiseBurst(ctx, t + 0.12 + k * 0.85 + Math.random() * 0.05, 0.06 + Math.random() * 0.05, 0.2 * (1 - k * 0.7), 1800 + Math.random() * 2600, 500, 'bandpass', 1.5);
+            }
+        } catch (e) {}
+    }
     const snd = {
         drop: () => Core.sfx.tone(260, 'sine', 0.11, 0.12, 140),
         merge: l => { const b = 240 + l * 55; Core.sfx.tone(b, 'triangle', 0.18, 0.18, b * 1.45); },
         laser: () => Core.sfx.tone(720, 'sawtooth', 0.25, 0.15, 110),
-        shake: () => {
-            Core.sfx.tone(120, 'square', 0.28, 0.12, 220);
-            Core.sfx.tone(70, 'sawtooth', 0.7, 0.14, 35, 0.02);
-            // Дребезг: серия коротких ударов в случайные моменты
-            for (let i = 0; i < 7; i++) Core.sfx.tone(160 + Math.random() * 280, 'square', 0.07, 0.07, null, 0.05 + i * 0.09 + Math.random() * 0.04);
-        },
-        boom: () => {
-            Core.sfx.tone(90, 'sawtooth', 0.5, 0.18, 40);
-            Core.sfx.tone(52, 'square', 0.95, 0.2, 24);
-            Core.sfx.tone(300, 'sawtooth', 0.28, 0.1, 60);
-            for (let i = 0; i < 6; i++) Core.sfx.tone(140 + Math.random() * 240, 'square', 0.08, 0.06, null, 0.12 + i * 0.1 + Math.random() * 0.05);
-        }
+        shake: () => explosion(1),
+        boom: () => explosion(1.25)
     };
 
     // ======================================================================
@@ -1034,7 +1073,7 @@
         const apply = () => {
             snd.shake();
             P.shake(world, Math.random);
-            kickScreen(SCREEN_SHAKE_AMP, 75);
+            if (world.wave) waves.push({ x: world.wave.x, y: world.wave.y, life: 0 }, { x: world.wave.x, y: world.wave.y, life: -6 });
             for (const b of world.balls) spawnParticles(b.x, b.y, b.kind === 'bomb' ? '#ffb347' : PL.PLANETS[b.level].color1, 3, 1.8);
             updateBoostersUI();
         };
