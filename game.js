@@ -394,6 +394,7 @@
     const SCREEN_SHAKE_AMP = 19;
     let shakeScreen = 0, shakeMax = 1, shakeAmp = 0;
     function kickScreen(amp, frames) {
+        return;   // тряска экрана отключена (физическая встряска планет остаётся)
         const cur = shakeScreen > 0 ? shakeAmp * Math.pow(shakeScreen / shakeMax, 1.3) : 0;
         shakeAmp = Math.max(amp, cur);
         shakeScreen = shakeMax = frames;
